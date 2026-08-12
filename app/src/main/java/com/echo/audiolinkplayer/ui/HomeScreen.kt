@@ -1,6 +1,9 @@
 package com.echo.audiolinkplayer.ui
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,6 +29,17 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.DriveFileMove
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Headphones
@@ -63,6 +78,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
@@ -85,6 +101,8 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import com.echo.audiolinkplayer.core.Folder as LibFolder
+import com.echo.audiolinkplayer.core.Library
 import com.echo.audiolinkplayer.core.PlayMode
 import com.echo.audiolinkplayer.core.QualityCap
 import com.echo.audiolinkplayer.core.Settings
@@ -97,7 +115,15 @@ private val SPEEDS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f, 3
 @Composable
 fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
 
-    val tracks by vm.tracks.collectAsState()
+    val library by vm.library.collectAsState()
+    val currentFolderId by vm.currentFolderId.collectAsState()
+    val folders = remember(library, currentFolderId) {
+        Library.foldersIn(library, currentFolderId)
+    }
+    val tracks = remember(library, currentFolderId) {
+        Library.tracksIn(library, currentFolderId)
+    }
+    val crumbs = remember(library, currentFolderId) { Library.pathTo(library, currentFolderId) }
     val ui by vm.ui.collectAsState()
     val busy by vm.busy.collectAsState()
     val message by vm.message.collectAsState()
@@ -112,6 +138,14 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
     var showAdd by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var expandedPlayer by remember { mutableStateOf(false) }
+    var fullscreen by remember { mutableStateOf(false) }
+    var showNewFolder by remember { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<LibFolder?>(null) }
+    var deleteTarget by remember { mutableStateOf<LibFolder?>(null) }
+    var noteTarget by remember { mutableStateOf<Track?>(null) }
+    var retitleTarget by remember { mutableStateOf<Track?>(null) }
+    var moveTrackTarget by remember { mutableStateOf<Track?>(null) }
+    var moveFolderTarget by remember { mutableStateOf<LibFolder?>(null) }
 
     LaunchedEffect(message) {
         message?.let {
@@ -126,14 +160,33 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
         }
     }
 
-    BackHandler(enabled = expandedPlayer) { expandedPlayer = false }
+    BackHandler(enabled = fullscreen) { fullscreen = false }
+    BackHandler(enabled = !fullscreen && expandedPlayer) { expandedPlayer = false }
+    BackHandler(enabled = !fullscreen && !expandedPlayer && currentFolderId != null) { vm.goUp() }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                title = { Text("AudioLinkPlayer", fontWeight = FontWeight.SemiBold) },
+                title = {
+                    Text(
+                        crumbs.lastOrNull()?.name ?: "AudioLinkPlayer",
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                navigationIcon = {
+                    if (currentFolderId != null) {
+                        IconButton(onClick = { vm.goUp() }) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "上一级")
+                        }
+                    }
+                },
                 actions = {
+                    IconButton(onClick = { showNewFolder = true }) {
+                        Icon(Icons.Default.CreateNewFolder, contentDescription = "新建文件夹")
+                    }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "设置")
                     }
@@ -161,9 +214,17 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
                 onQuality = vm::setQuality
             )
 
+            if (crumbs.isNotEmpty()) {
+                Breadcrumb(crumbs = crumbs, onNavigate = vm::openFolder)
+            }
+
             Box(Modifier.weight(1f)) {
-                if (tracks.isEmpty()) {
-                    EmptyState { showAdd = true }
+                if (folders.isEmpty() && tracks.isEmpty()) {
+                    EmptyState(
+                        inFolder = currentFolderId != null,
+                        onAdd = { showAdd = true },
+                        onNewFolder = { showNewFolder = true }
+                    )
                 } else {
                     LazyColumn(
                         Modifier.fillMaxSize(),
@@ -172,13 +233,38 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
                         ),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        itemsIndexed(tracks, key = { _, t -> t.id }) { _, track ->
+                        itemsIndexed(folders, key = { _, f -> f.id }) { index, folder ->
+                            val counts = remember(library, folder.id) {
+                                Library.countsIn(library, folder.id)
+                            }
+                            FolderRow(
+                                folder = folder,
+                                subFolders = counts.first,
+                                trackCount = counts.second,
+                                isFirst = index == 0,
+                                isLast = index == folders.lastIndex,
+                                onOpen = { vm.openFolder(folder.id) },
+                                onRename = { renameTarget = folder },
+                                onMove = { moveFolderTarget = folder },
+                                onUp = { vm.moveFolder(folder, -1) },
+                                onDown = { vm.moveFolder(folder, 1) },
+                                onDelete = { deleteTarget = folder }
+                            )
+                        }
+                        itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
                             TrackRow(
                                 track = track,
                                 isCurrent = ui.currentTrackId == track.id,
                                 isLoading = track.id in resolving,
+                                isFirst = index == 0,
+                                isLast = index == tracks.lastIndex,
                                 onPlay = { vm.play(track) },
                                 onAdd = { showAdd = true },
+                                onNote = { noteTarget = track },
+                                onRetitle = { retitleTarget = track },
+                                onMove = { moveTrackTarget = track },
+                                onUp = { vm.moveTrack(track, -1) },
+                                onDown = { vm.moveTrack(track, 1) },
                                 onDelete = { vm.remove(track) }
                             )
                         }
@@ -186,10 +272,11 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
                 }
             }
 
-            if (tracks.isNotEmpty()) {
+            if (library.tracks.isNotEmpty()) {
                 NowPlayingBar(
                     vm = vm,
-                    title = tracks.firstOrNull { it.id == ui.currentTrackId }?.title ?: "未播放",
+                    title = library.tracks.firstOrNull { it.id == ui.currentTrackId }
+                        ?.displayTitle ?: "未播放",
                     ui = ui,
                     onExpand = { expandedPlayer = true }
                 )
@@ -200,10 +287,11 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
     if (expandedPlayer) {
         FullPlayer(
             vm = vm,
-            title = tracks.firstOrNull { it.id == ui.currentTrackId }?.title ?: "",
+            title = library.tracks.firstOrNull { it.id == ui.currentTrackId }?.displayTitle ?: "",
             ui = ui,
             formats = formats,
-            onClose = { expandedPlayer = false }
+            onClose = { expandedPlayer = false },
+            onFullscreen = { fullscreen = true }
         )
     }
 
@@ -224,10 +312,117 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
     updateReport?.let { report ->
         UpdateReportDialog(text = report, onDismiss = { vm.dismissUpdateReport() })
     }
+
+    if (fullscreen) {
+        FullscreenVideo(vm = vm, ui = ui, onExit = { fullscreen = false })
+    }
+
+    if (showNewFolder) {
+        TextPromptDialog(
+            title = "新建文件夹",
+            label = "文件夹名称",
+            initial = "",
+            onDismiss = { showNewFolder = false },
+            onConfirm = {
+                showNewFolder = false
+                vm.createFolder(it)
+            }
+        )
+    }
+
+    renameTarget?.let { folder ->
+        TextPromptDialog(
+            title = "重命名文件夹",
+            label = "文件夹名称",
+            initial = folder.name,
+            onDismiss = { renameTarget = null },
+            onConfirm = {
+                renameTarget = null
+                vm.renameFolder(folder, it)
+            }
+        )
+    }
+
+    noteTarget?.let { track ->
+        TextPromptDialog(
+            title = "备注",
+            label = "给这个视频写点什么",
+            initial = track.note,
+            multiline = true,
+            allowEmpty = true,
+            onDismiss = { noteTarget = null },
+            onConfirm = {
+                noteTarget = null
+                vm.setNote(track, it)
+            }
+        )
+    }
+
+    retitleTarget?.let { track ->
+        TextPromptDialog(
+            title = "重命名",
+            label = "留空则恢复原标题",
+            initial = track.customTitle,
+            allowEmpty = true,
+            onDismiss = { retitleTarget = null },
+            onConfirm = {
+                retitleTarget = null
+                vm.setCustomTitle(track, it)
+            }
+        )
+    }
+
+    moveTrackTarget?.let { track ->
+        FolderPickerDialog(
+            title = "移动到",
+            choices = remember(library) { vm.folderChoices() },
+            onDismiss = { moveTrackTarget = null },
+            onPick = { target ->
+                moveTrackTarget = null
+                vm.moveTrackTo(track, target?.id)
+            }
+        )
+    }
+
+    moveFolderTarget?.let { folder ->
+        FolderPickerDialog(
+            title = "把「${folder.name}」移动到",
+            choices = remember(library) { vm.folderChoices() },
+            onDismiss = { moveFolderTarget = null },
+            onPick = { target ->
+                moveFolderTarget = null
+                vm.moveFolderTo(folder, target?.id)
+            }
+        )
+    }
+
+    deleteTarget?.let { folder ->
+        val counts = remember(library, folder.id) { Library.countsIn(library, folder.id) }
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除「${folder.name}」") },
+            text = {
+                Text(
+                    if (counts.first == 0 && counts.second == 0) "这个文件夹是空的。"
+                    else "里面还有 ${counts.first} 个子文件夹、${counts.second} 个视频，" +
+                        "都会一起删掉。链接本身没有下载到手机，删了可以重新粘贴。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteTarget = null
+                    vm.deleteFolder(folder)
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+            }
+        )
+    }
 }
 
 @Composable
-private fun EmptyState(onAdd: () -> Unit) {
+private fun EmptyState(inFolder: Boolean, onAdd: () -> Unit, onNewFolder: () -> Unit) {
     Column(
         Modifier
             .fillMaxSize()
@@ -241,20 +436,227 @@ private fun EmptyState(onAdd: () -> Unit) {
             tint = MaterialTheme.colorScheme.primary
         )
         Spacer(Modifier.height(16.dp))
-        Text("粘贴一个视频链接开始", style = MaterialTheme.typography.titleMedium)
+        Text(
+            if (inFolder) "这个文件夹还是空的" else "粘贴一个视频链接开始",
+            style = MaterialTheme.typography.titleMedium
+        )
         Spacer(Modifier.height(6.dp))
         Text(
-            "解析后只播放流，不会下载到手机。\n息屏和退出 App 后音频继续播放。",
+            if (inFolder) "在这里添加的链接会直接放进当前文件夹。"
+            else "解析后只播放流，不会下载到手机。\n息屏和退出 App 后音频继续播放。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(20.dp))
-        OutlinedButton(onClick = onAdd) {
-            Icon(Icons.Default.Add, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("添加链接")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onAdd) {
+                Icon(Icons.Default.Add, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("添加链接")
+            }
+            OutlinedButton(onClick = onNewFolder) {
+                Icon(Icons.Default.CreateNewFolder, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("新建文件夹")
+            }
         }
     }
+}
+
+/** Tappable path back up the tree; the leading chip returns to the top level. */
+@Composable
+private fun Breadcrumb(crumbs: List<LibFolder>, onNavigate: (String?) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            "根目录",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .clickable { onNavigate(null) }
+                .padding(vertical = 6.dp, horizontal = 4.dp)
+        )
+        crumbs.forEachIndexed { index, folder ->
+            Text("/", style = MaterialTheme.typography.labelMedium)
+            val isLast = index == crumbs.lastIndex
+            Text(
+                folder.name,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (isLast) FontWeight.Bold else FontWeight.Normal,
+                color = if (isLast) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                modifier = Modifier
+                    .clickable(enabled = !isLast) { onNavigate(folder.id) }
+                    .padding(vertical = 6.dp, horizontal = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun FolderRow(
+    folder: LibFolder,
+    subFolders: Int,
+    trackCount: Int,
+    isFirst: Boolean,
+    isLast: Boolean,
+    onOpen: () -> Unit,
+    onRename: () -> Unit,
+    onMove: () -> Unit,
+    onUp: () -> Unit,
+    onDown: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var menu by remember { mutableStateOf(false) }
+    Card(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Default.Folder,
+                contentDescription = null,
+                modifier = Modifier.size(32.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    folder.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    listOfNotNull(
+                        subFolders.takeIf { it > 0 }?.let { "$it 个文件夹" },
+                        trackCount.takeIf { it > 0 }?.let { "$it 个视频" }
+                    ).joinToString(" · ").ifEmpty { "空文件夹" },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Box {
+                IconButton(onClick = { menu = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                }
+                DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                        onClick = { menu = false; onRename() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("移动到…") },
+                        leadingIcon = { Icon(Icons.Default.DriveFileMove, null) },
+                        onClick = { menu = false; onMove() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("上移") },
+                        enabled = !isFirst,
+                        leadingIcon = { Icon(Icons.Default.ArrowUpward, null) },
+                        onClick = { menu = false; onUp() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("下移") },
+                        enabled = !isLast,
+                        leadingIcon = { Icon(Icons.Default.ArrowDownward, null) },
+                        onClick = { menu = false; onDown() }
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("删除") },
+                        leadingIcon = { Icon(Icons.Default.Delete, null) },
+                        onClick = { menu = false; onDelete() }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Prompt with a single text field, reused for names, notes and title overrides. */
+@Composable
+private fun TextPromptDialog(
+    title: String,
+    label: String,
+    initial: String,
+    multiline: Boolean = false,
+    allowEmpty: Boolean = false,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text(label) },
+                singleLine = !multiline,
+                minLines = if (multiline) 3 else 1,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(
+                enabled = allowEmpty || text.isNotBlank(),
+                onClick = { onConfirm(text) }
+            ) { Text("确定") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+/** Flat, indented list of every folder — the destination picker for moves. */
+@Composable
+private fun FolderPickerDialog(
+    title: String,
+    choices: List<Pair<LibFolder?, Int>>,
+    onDismiss: () -> Unit,
+    onPick: (LibFolder?) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                choices.forEach { (folder, depth) ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(folder) }
+                            .padding(start = (depth * 16).dp, top = 10.dp, bottom = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Folder,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(folder?.name ?: "根目录", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 @Composable
@@ -308,10 +710,18 @@ private fun TrackRow(
     track: Track,
     isCurrent: Boolean,
     isLoading: Boolean,
+    isFirst: Boolean,
+    isLast: Boolean,
     onPlay: () -> Unit,
     onAdd: () -> Unit,
+    onNote: () -> Unit,
+    onRetitle: () -> Unit,
+    onMove: () -> Unit,
+    onUp: () -> Unit,
+    onDown: () -> Unit,
     onDelete: () -> Unit
 ) {
+    var menu by remember { mutableStateOf(false) }
     Card(
         Modifier
             .fillMaxWidth()
@@ -344,7 +754,7 @@ private fun TrackRow(
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    track.title,
+                    track.displayTitle,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodyMedium,
@@ -359,17 +769,69 @@ private fun TrackRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (track.note.isNotBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Notes,
+                            contentDescription = null,
+                            modifier = Modifier.size(12.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            track.note,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
             }
             // The "+" the user asked for: add the next link right from any row.
             IconButton(onClick = onAdd) {
                 Icon(Icons.Default.Add, contentDescription = "再添加一个")
             }
-            IconButton(onClick = onDelete) {
-                Icon(
-                    Icons.Default.Delete,
-                    contentDescription = "移除",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            Box {
+                IconButton(onClick = { menu = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "更多")
+                }
+                DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text(if (track.note.isBlank()) "添加备注" else "编辑备注") },
+                        leadingIcon = { Icon(Icons.Default.Notes, null) },
+                        onClick = { menu = false; onNote() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                        onClick = { menu = false; onRetitle() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("移动到…") },
+                        leadingIcon = { Icon(Icons.Default.DriveFileMove, null) },
+                        onClick = { menu = false; onMove() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("上移") },
+                        enabled = !isFirst,
+                        leadingIcon = { Icon(Icons.Default.ArrowUpward, null) },
+                        onClick = { menu = false; onUp() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("下移") },
+                        enabled = !isLast,
+                        leadingIcon = { Icon(Icons.Default.ArrowDownward, null) },
+                        onClick = { menu = false; onDown() }
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("移除") },
+                        leadingIcon = { Icon(Icons.Default.Delete, null) },
+                        onClick = { menu = false; onDelete() }
+                    )
+                }
             }
         }
     }
@@ -440,7 +902,8 @@ private fun FullPlayer(
     title: String,
     ui: PlayerUiState,
     formats: List<com.echo.audiolinkplayer.core.StreamFormat>,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    onFullscreen: () -> Unit
 ) {
     var formatMenu by remember { mutableStateOf(false) }
     var scrub by remember { mutableStateOf<Float?>(null) }
@@ -465,6 +928,15 @@ private fun FullPlayer(
                             .aspectRatio(16f / 9f)
                             .background(Color.Black)
                     )
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = onFullscreen,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Fullscreen, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("全屏播放")
+                    }
                     Spacer(Modifier.height(12.dp))
                 }
 
@@ -841,6 +1313,74 @@ private fun StaleEngineBanner(onUpdate: () -> Unit) {
                 modifier = Modifier.weight(1f)
             )
             TextButton(onClick = onUpdate) { Text("更新") }
+        }
+    }
+}
+
+/**
+ * Landscape, edge-to-edge video. Drawn over the whole activity rather than in a
+ * Dialog so that hiding the system bars actually applies to the visible window.
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+@Composable
+private fun FullscreenVideo(vm: MainViewModel, ui: PlayerUiState, onExit: () -> Unit) {
+    val context = LocalContext.current
+    val activity = remember(context) { context as? android.app.Activity }
+
+    DisposableEffect(Unit) {
+        val window = activity?.window
+        val previousOrientation =
+            activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        val insets = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
+        insets?.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        insets?.hide(WindowInsetsCompat.Type.systemBars())
+        onDispose {
+            insets?.show(WindowInsetsCompat.Type.systemBars())
+            activity?.requestedOrientation = previousOrientation
+        }
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    useController = true
+                    setShowNextButton(true)
+                    setShowPreviousButton(true)
+                    setKeepContentOnPlayerReset(true)
+                    resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                }
+            },
+            update = { it.player = vm.player() },
+            modifier = Modifier.fillMaxSize()
+        )
+        IconButton(
+            onClick = onExit,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(12.dp)
+        ) {
+            Icon(
+                Icons.Default.FullscreenExit,
+                contentDescription = "退出全屏",
+                tint = Color.White
+            )
+        }
+        if (!ui.hasVideo) {
+            Text(
+                "当前是仅音频模式，切到「视频」才有画面",
+                color = Color.White,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(16.dp)
+            )
         }
     }
 }

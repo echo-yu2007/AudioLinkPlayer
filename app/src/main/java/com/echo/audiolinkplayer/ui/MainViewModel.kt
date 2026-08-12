@@ -14,7 +14,10 @@ import com.echo.audiolinkplayer.core.CookieStore
 import com.echo.audiolinkplayer.core.Diagnostics
 import com.echo.audiolinkplayer.core.EngineUpdater
 import com.echo.audiolinkplayer.core.Extractor
+import com.echo.audiolinkplayer.core.Folder
 import com.echo.audiolinkplayer.core.FormatPicker
+import com.echo.audiolinkplayer.core.Library
+import com.echo.audiolinkplayer.core.LibraryState
 import com.echo.audiolinkplayer.core.MediaInfo
 import com.echo.audiolinkplayer.core.PlayMode
 import com.echo.audiolinkplayer.core.PlaylistStore
@@ -51,8 +54,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private var controller: MediaController? = null
 
-    private val _tracks = MutableStateFlow<List<Track>>(emptyList())
-    val tracks: StateFlow<List<Track>> = _tracks.asStateFlow()
+    private val _library = MutableStateFlow(LibraryState())
+    val library: StateFlow<LibraryState> = _library.asStateFlow()
+
+    /** Folder currently being browsed; null is the top level. */
+    private val _currentFolderId = MutableStateFlow<String?>(null)
+    val currentFolderId: StateFlow<String?> = _currentFolderId.asStateFlow()
+
+    /** The folder whose contents the player queue was built from. */
+    private var queueFolderId: String? = null
+    private var queueInitialised = false
+
+    private val tracksAll: List<Track> get() = _library.value.tracks
 
     private val _ui = MutableStateFlow(PlayerUiState())
     val ui: StateFlow<PlayerUiState> = _ui.asStateFlow()
@@ -88,7 +101,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     init {
         connect()
         viewModelScope.launch {
-            _tracks.value = PlaylistStore.load(getApplication())
+            _library.value = PlaylistStore.load(getApplication())
         }
         viewModelScope.launch {
             while (true) {
@@ -154,6 +167,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _message.value = "没找到有效链接（需要以 http 开头）"
             return
         }
+        val destination = _currentFolderId.value
         viewModelScope.launch {
             _busy.value = true
             var added = 0
@@ -163,8 +177,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     if (list.isEmpty()) {
                         _message.value = "没解析到内容：$url"
                     } else {
-                        _tracks.value = _tracks.value + list
-                        added += list.size
+                        // New links land in whichever folder the user is looking at.
+                        var next = Library.nextTrackOrder(_library.value, destination)
+                        val placed = list.map { it.copy(parentId = destination, order = next++) }
+                        _library.value = _library.value.copy(tracks = tracksAll + placed)
+                        added += placed.size
                     }
                 }.onFailure { e ->
                     _message.value = friendlyError(e)
@@ -173,9 +190,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _busy.value = false
             if (added > 0) {
                 _message.value = "已添加 $added 个"
-                PlaylistStore.save(getApplication(), _tracks.value)
+                persist()
                 // Warm up the first item so tapping play is instant.
-                _tracks.value.firstOrNull { it.id !in resolvedIds }?.let { prepare(it) }
+                Library.tracksIn(_library.value, destination)
+                    .firstOrNull { it.id !in resolvedIds }
+                    ?.let { prepare(it) }
             }
         }
     }
@@ -187,8 +206,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 resolvedIds.remove(track.id)
                 runCatching { controller?.removeMediaItem(idx) }
             }
-            _tracks.value = _tracks.value.filterNot { it.id == track.id }
-            PlaylistStore.save(getApplication(), _tracks.value)
+            _library.value = _library.value.copy(
+                tracks = tracksAll.filterNot { it.id == track.id }
+            )
+            persist()
         }
     }
 
@@ -196,16 +217,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             controller?.clearMediaItems()
             resolvedIds.clear()
-            _tracks.value = emptyList()
-            PlaylistStore.save(getApplication(), emptyList())
+            queueInitialised = false
+            _library.value = LibraryState()
+            _currentFolderId.value = null
+            persist()
         }
     }
 
+    private suspend fun persist() = PlaylistStore.save(getApplication(), _library.value)
+
+    /** The ordered set of tracks the player queue mirrors: one folder's contents. */
+    private fun queueTracks(): List<Track> = Library.tracksIn(_library.value, queueFolderId)
+
     /** Position of [track] inside the player queue (queue holds only resolved tracks). */
     private fun playerIndexOf(track: Track): Int {
-        val listIdx = _tracks.value.indexOfFirst { it.id == track.id }
+        val scope = queueTracks()
+        val listIdx = scope.indexOfFirst { it.id == track.id }
         if (listIdx < 0) return 0
-        return _tracks.value.take(listIdx).count { it.id in resolvedIds }
+        return scope.take(listIdx).count { it.id in resolvedIds }
     }
 
     private suspend fun prepare(track: Track): Boolean {
@@ -216,7 +245,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val info = Extractor.mediaInfo(getApplication(), track.sourceUrl)
             val selection = FormatPicker.pick(info, _playMode.value, _quality.value)
             if (selection == null) {
-                _message.value = "没有可播放的流：${track.title}"
+                _message.value = "没有可播放的流：${track.displayTitle}"
                 return false
             }
             // Refresh metadata we only learn about after the full extraction.
@@ -226,7 +255,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 durationMs = if (track.durationMs > 0) track.durationMs else info.durationMs,
                 uploader = track.uploader ?: info.uploader
             )
-            _tracks.value = _tracks.value.map { if (it.id == track.id) enriched else it }
+            _library.value = _library.value.copy(
+                tracks = tracksAll.map { if (it.id == track.id) enriched else it }
+            )
 
             val item = MediaItems.build(enriched, selection, _playMode.value)
             withContext(Dispatchers.Main) {
@@ -246,6 +277,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun play(track: Track) {
         viewModelScope.launch {
+            // Playing from a different folder replaces the queue, so auto-advance
+            // and list-repeat stay scoped to what you are looking at.
+            if (!queueInitialised || queueFolderId != track.parentId) {
+                queueFolderId = track.parentId
+                queueInitialised = true
+                resolvedIds.clear()
+                withContext(Dispatchers.Main) { controller?.clearMediaItems() }
+            }
             if (track.id !in resolvedIds) {
                 _busy.value = true
                 val ok = prepare(track)
@@ -264,7 +303,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun resolveRestInBackground() {
         viewModelScope.launch {
-            for (t in _tracks.value) {
+            for (t in queueTracks()) {
                 if (t.id in resolvedIds) continue
                 prepare(t)
             }
@@ -333,7 +372,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun reloadCurrent() {
         val c = controller ?: return
         val id = c.currentMediaItem?.mediaId ?: return
-        val track = _tracks.value.firstOrNull { it.id == id } ?: return
+        val track = tracksAll.firstOrNull { it.id == id } ?: return
         val position = c.currentPosition
         val wasPlaying = c.isPlaying
         val index = c.currentMediaItemIndex
@@ -361,7 +400,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun selectFormat(format: StreamFormat) {
         val c = controller ?: return
         val id = c.currentMediaItem?.mediaId ?: return
-        val track = _tracks.value.firstOrNull { it.id == id } ?: return
+        val track = tracksAll.firstOrNull { it.id == id } ?: return
         val position = c.currentPosition
         val index = c.currentMediaItemIndex
         viewModelScope.launch {
@@ -437,6 +476,172 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cookieDomains(): List<String> = CookieStore.savedDomains(getApplication())
+
+    // ------------------------------------------------------------- library
+
+    /** Contents of the folder being browsed, folders first. */
+    fun visibleFolders(): List<Folder> = Library.foldersIn(_library.value, _currentFolderId.value)
+
+    fun visibleTracks(): List<Track> = Library.tracksIn(_library.value, _currentFolderId.value)
+
+    fun breadcrumb(): List<Folder> = Library.pathTo(_library.value, _currentFolderId.value)
+
+    fun openFolder(id: String?) {
+        _currentFolderId.value = id
+    }
+
+    fun goUp() {
+        val current = Library.folder(_library.value, _currentFolderId.value)
+        _currentFolderId.value = current?.parentId
+    }
+
+    /** True while there is somewhere to go back to — drives the back button. */
+    fun canGoUp(): Boolean = _currentFolderId.value != null
+
+    fun createFolder(rawName: String) {
+        val name = rawName.trim().ifBlank { "新建文件夹" }
+        val parent = _currentFolderId.value
+        if (Library.depthOf(_library.value, parent) >= Library.MAX_DEPTH) {
+            _message.value = "最多 ${Library.MAX_DEPTH} 层，这里不能再建了"
+            return
+        }
+        val folder = Folder(
+            id = "f${System.currentTimeMillis()}_${_library.value.folders.size}",
+            name = name,
+            parentId = parent,
+            order = Library.nextFolderOrder(_library.value, parent)
+        )
+        viewModelScope.launch {
+            _library.value = _library.value.copy(folders = _library.value.folders + folder)
+            persist()
+            _message.value = "已创建「$name」"
+        }
+    }
+
+    fun renameFolder(folder: Folder, rawName: String) {
+        val name = rawName.trim()
+        if (name.isBlank()) return
+        viewModelScope.launch {
+            _library.value = _library.value.copy(
+                folders = _library.value.folders.map {
+                    if (it.id == folder.id) it.copy(name = name) else it
+                }
+            )
+            persist()
+        }
+    }
+
+    /** Removes the folder and everything nested inside it. */
+    fun deleteFolder(folder: Folder) {
+        viewModelScope.launch {
+            val doomed = Library.subtreeIds(_library.value, folder.id)
+            // Anything queued from inside the deleted subtree has to leave the player too.
+            if (queueFolderId in doomed) {
+                withContext(Dispatchers.Main) { controller?.clearMediaItems() }
+                resolvedIds.clear()
+                queueInitialised = false
+            }
+            _library.value = Library.deleteFolder(_library.value, folder.id)
+            if (_currentFolderId.value in doomed) _currentFolderId.value = folder.parentId
+            persist()
+            _message.value = "已删除「${folder.name}」"
+        }
+    }
+
+    fun moveFolder(folder: Folder, delta: Int) {
+        viewModelScope.launch {
+            _library.value = Library.reorderFolders(_library.value, folder.id, delta)
+            persist()
+        }
+    }
+
+    fun moveTrack(track: Track, delta: Int) {
+        viewModelScope.launch {
+            _library.value = Library.reorderTracks(_library.value, track.id, delta)
+            persist()
+            // The player queue mirrors folder order, so rebuild it after a reshuffle.
+            if (queueFolderId == track.parentId) rebuildQueue()
+        }
+    }
+
+    /** Re-parents a track. [targetId] of null means the top level. */
+    fun moveTrackTo(track: Track, targetId: String?) {
+        viewModelScope.launch {
+            val moved = track.copy(
+                parentId = targetId,
+                order = Library.nextTrackOrder(_library.value, targetId)
+            )
+            _library.value = _library.value.copy(
+                tracks = tracksAll.map { if (it.id == track.id) moved else it }
+            )
+            persist()
+            if (queueFolderId == track.parentId || queueFolderId == targetId) rebuildQueue()
+            _message.value = "已移动到「${Library.folder(_library.value, targetId)?.name ?: "根目录"}」"
+        }
+    }
+
+    fun moveFolderTo(folder: Folder, targetId: String?) {
+        val problem = Library.moveFolderProblem(_library.value, folder.id, targetId)
+        if (problem != null) {
+            _message.value = problem
+            return
+        }
+        viewModelScope.launch {
+            _library.value = _library.value.copy(
+                folders = _library.value.folders.map {
+                    if (it.id == folder.id) it.copy(
+                        parentId = targetId,
+                        order = Library.nextFolderOrder(_library.value, targetId)
+                    ) else it
+                }
+            )
+            persist()
+        }
+    }
+
+    fun setNote(track: Track, note: String) {
+        viewModelScope.launch {
+            _library.value = _library.value.copy(
+                tracks = tracksAll.map {
+                    if (it.id == track.id) it.copy(note = note.trim()) else it
+                }
+            )
+            persist()
+        }
+    }
+
+    fun setCustomTitle(track: Track, title: String) {
+        viewModelScope.launch {
+            _library.value = _library.value.copy(
+                tracks = tracksAll.map {
+                    if (it.id == track.id) it.copy(customTitle = title.trim()) else it
+                }
+            )
+            persist()
+        }
+    }
+
+    /** Every folder, flattened and indented, for the "move to..." picker. */
+    fun folderChoices(): List<Pair<Folder?, Int>> {
+        val out = mutableListOf<Pair<Folder?, Int>>(null to 0)
+        fun walk(parentId: String?, depth: Int) {
+            Library.foldersIn(_library.value, parentId).forEach { f ->
+                out += f to depth
+                walk(f.id, depth + 1)
+            }
+        }
+        walk(null, 1)
+        return out
+    }
+
+    /** Drops and re-resolves the queue after its folder's order or contents changed. */
+    private fun rebuildQueue() {
+        viewModelScope.launch {
+            withContext(Dispatchers.Main) { controller?.clearMediaItems() }
+            resolvedIds.clear()
+            queueTracks().forEach { prepare(it) }
+        }
+    }
 
     fun consumeMessage() {
         _message.value = null

@@ -41,7 +41,7 @@ object MediaItems {
         }
 
         val metadata = MediaMetadata.Builder()
-            .setTitle(track.title)
+            .setTitle(track.displayTitle)
             .setArtist(track.uploader ?: "AudioLinkPlayer")
             .setIsPlayable(true)
             .setIsBrowsable(false)

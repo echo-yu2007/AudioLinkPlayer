@@ -57,8 +57,19 @@ data class Track(
     val uploader: String? = null,
     val thumbnail: String? = null,
     val durationMs: Long = 0L,
-    val isLive: Boolean = false
+    val isLive: Boolean = false,
+    /** Owning folder; null means it sits at the top level. */
+    val parentId: String? = null,
+    /** Position among its siblings. */
+    val order: Int = 0,
+    /** Free-text note the user attaches to this entry. */
+    val note: String = "",
+    /** User-supplied title override; the extracted title stays in [title]. */
+    val customTitle: String = ""
 ) {
+    /** What the UI and the notification should show. */
+    val displayTitle: String get() = customTitle.ifBlank { title }
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
         put("sourceUrl", sourceUrl)
@@ -67,6 +78,10 @@ data class Track(
         put("thumbnail", thumbnail ?: JSONObject.NULL)
         put("durationMs", durationMs)
         put("isLive", isLive)
+        put("parentId", parentId ?: JSONObject.NULL)
+        put("order", order)
+        put("note", note)
+        put("customTitle", customTitle)
     }
 
     companion object {
@@ -77,7 +92,11 @@ data class Track(
             uploader = o.optString("uploader").takeIf { it.isNotEmpty() && it != "null" },
             thumbnail = o.optString("thumbnail").takeIf { it.isNotEmpty() && it != "null" },
             durationMs = o.optLong("durationMs"),
-            isLive = o.optBoolean("isLive")
+            isLive = o.optBoolean("isLive"),
+            parentId = o.optString("parentId").takeIf { it.isNotEmpty() && it != "null" },
+            order = o.optInt("order"),
+            note = o.optString("note"),
+            customTitle = o.optString("customTitle")
         )
     }
 }
