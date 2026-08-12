@@ -11,6 +11,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.echo.audiolinkplayer.core.CookieStore
+import com.echo.audiolinkplayer.core.Diagnostics
+import com.echo.audiolinkplayer.core.EngineUpdater
 import com.echo.audiolinkplayer.core.Extractor
 import com.echo.audiolinkplayer.core.FormatPicker
 import com.echo.audiolinkplayer.core.MediaInfo
@@ -76,8 +78,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _formatOptions = MutableStateFlow<List<StreamFormat>>(emptyList())
     val formatOptions: StateFlow<List<StreamFormat>> = _formatOptions.asStateFlow()
 
-    var engineVersion: String? = null
-        private set
+    private val _engineVersion = MutableStateFlow<String?>(null)
+    val engineVersion: StateFlow<String?> = _engineVersion.asStateFlow()
+
+    /** Non-null while an update-result sheet should be on screen. */
+    private val _updateReport = MutableStateFlow<String?>(null)
+    val updateReport: StateFlow<String?> = _updateReport.asStateFlow()
 
     init {
         connect()
@@ -99,7 +105,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             runCatching { Extractor.ensureInit(getApplication()) }
-            engineVersion = Extractor.engineVersion
+            _engineVersion.value = runCatching { Extractor.refreshVersion(getApplication()) }
+                .getOrNull()
         }
     }
 
@@ -383,13 +390,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateEngine() {
         viewModelScope.launch {
             _busy.value = true
-            _message.value = "正在更新解析引擎…"
-            _message.value = runCatching { Extractor.updateEngine(getApplication()) }
-                .getOrElse { "更新失败：${it.message}" }
-            engineVersion = Extractor.engineVersion
+            _updateReport.value = "正在准备…"
+            val result = runCatching {
+                Extractor.updateEngine(getApplication()) { step ->
+                    _updateReport.value = step
+                }
+            }.getOrElse {
+                EngineUpdater.Result(false, null, "更新失败：${it.message}")
+            }
+            _engineVersion.value = result.version ?: _engineVersion.value
             Settings.lastUpdateCheck = System.currentTimeMillis()
+            _updateReport.value = result.detail
             _busy.value = false
         }
+    }
+
+    fun dismissUpdateReport() {
+        _updateReport.value = null
+    }
+
+    fun engineIsStale(): Boolean = EngineUpdater.isStale(_engineVersion.value)
+
+    fun diagnostics(): String = buildString {
+        appendLine("yt-dlp: ${_engineVersion.value ?: "未知"}")
+        appendLine("代理: ${Settings.proxySpec.ifBlank { "未设置" }}")
+        appendLine("已保存 Cookie 域名: ${cookieDomains().joinToString(", ").ifBlank { "无" }}")
+        appendLine()
+        append(Diagnostics.dump())
+    }
+
+    fun setProxy(spec: String) {
+        Settings.proxySpec = spec
+        _message.value = if (spec.isBlank()) "已关闭代理" else "代理已设为 $spec"
     }
 
     fun clearCache() {
@@ -413,13 +445,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun friendlyError(e: Throwable): String {
         val raw = e.message.orEmpty()
         return when {
+            // The single most common failure: an out-of-date yt-dlp gets bounced by
+            // the site's bot gate long before it ever reaches the video.
+            raw.contains("403") || raw.contains("Forbidden", true) ->
+                "被网站拒绝了 (403)。多半是解析引擎过期——去设置里点「立即更新」；" +
+                    "更新完还不行的话，可能需要在设置里填代理地址。"
             raw.contains("Unsupported URL", true) -> "这个站点/链接暂不支持，试试更新解析引擎"
-            raw.contains("Sign in", true) || raw.contains("login", true) ->
+            raw.contains("Sign in", true) || raw.contains("log in", true) ->
                 "需要登录，请到设置里用内置浏览器登录该网站"
             raw.contains("private", true) -> "这是私有内容，需要登录后才能访问"
-            raw.contains("geo", true) -> "该内容有地区限制"
+            raw.contains("not available in your country", true) || raw.contains("geo", true) ->
+                "该内容有地区限制，试试在设置里填代理地址"
+            raw.contains("timed out", true) || raw.contains("Connection", true) ->
+                "连不上这个网站。如果你在用代理/VPN，去设置里把代理地址填上。"
             raw.isBlank() -> "解析失败：${e.javaClass.simpleName}"
-            else -> "解析失败：" + raw.lines().lastOrNull { it.isNotBlank() }?.take(160)
+            else -> "解析失败：" + raw.lines().lastOrNull { it.isNotBlank() }?.take(200)
         }
     }
 }

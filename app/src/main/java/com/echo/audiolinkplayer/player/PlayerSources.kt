@@ -7,6 +7,7 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
@@ -17,8 +18,11 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import com.echo.audiolinkplayer.core.HeaderStore
+import com.echo.audiolinkplayer.core.Http
 import com.echo.audiolinkplayer.core.Settings
+import okhttp3.OkHttpClient
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 @UnstableApi
 object PlayerSources {
@@ -54,11 +58,24 @@ object PlayerSources {
     }
 
     fun dataSourceFactory(context: Context): DataSource.Factory {
-        val http = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(20_000)
-            .setReadTimeoutMs(20_000)
-            .setKeepPostFor302Redirects(true)
+        // If the page needed a proxy to resolve, the media CDN almost certainly
+        // needs it too, so the stream goes through the same proxy.
+        val proxy = Settings.proxy(context)?.let(Http::parseProxy)
+        val http: DataSource.Factory = if (proxy != null) {
+            OkHttpDataSource.Factory(
+                OkHttpClient.Builder()
+                    .proxy(proxy)
+                    .connectTimeout(20, TimeUnit.SECONDS)
+                    .readTimeout(20, TimeUnit.SECONDS)
+                    .build()
+            )
+        } else {
+            DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(20_000)
+                .setReadTimeoutMs(20_000)
+                .setKeepPostFor302Redirects(true)
+        }
 
         // Per-request header injection: ExoPlayer has no per-item header API.
         val resolving = ResolvingDataSource.Factory(http) { spec: DataSpec ->

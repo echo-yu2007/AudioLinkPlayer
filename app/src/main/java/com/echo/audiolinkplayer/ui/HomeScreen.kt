@@ -105,6 +105,8 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
     val playMode by vm.playMode.collectAsState()
     val quality by vm.quality.collectAsState()
     val formats by vm.formatOptions.collectAsState()
+    val engineVersion by vm.engineVersion.collectAsState()
+    val updateReport by vm.updateReport.collectAsState()
 
     val snackbar = remember { SnackbarHostState() }
     var showAdd by remember { mutableStateOf(false) }
@@ -146,6 +148,10 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
         ) {
             if (busy) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+
+            if (engineVersion != null && vm.engineIsStale()) {
+                StaleEngineBanner(onUpdate = { vm.updateEngine() })
             }
 
             ModeRow(
@@ -213,6 +219,10 @@ fun HomeScreen(vm: MainViewModel, incomingLink: MutableState<String?>) {
 
     if (showSettings) {
         SettingsDialog(vm = vm, onDismiss = { showSettings = false })
+    }
+
+    updateReport?.let { report ->
+        UpdateReportDialog(text = report, onDismiss = { vm.dismissUpdateReport() })
     }
 }
 
@@ -608,7 +618,17 @@ private fun SettingsDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     var cacheMb by remember { mutableStateOf(Settings.cacheMb.toFloat()) }
     var autoUpdate by remember { mutableStateOf(Settings.autoUpdate) }
+    var nightly by remember { mutableStateOf(Settings.nightlyEngine) }
+    var proxy by remember { mutableStateOf(Settings.proxySpec) }
+    var engineUrl by remember { mutableStateOf(Settings.customEngineUrlValue) }
+    var showLog by remember { mutableStateOf(false) }
+    var webViewUa by remember { mutableStateOf(Settings.useWebViewUa) }
+    val engineVersion by vm.engineVersion.collectAsState()
     val domains = remember { vm.cookieDomains() }
+
+    if (showLog) {
+        LogDialog(text = vm.diagnostics(), onDismiss = { showLog = false })
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -638,6 +658,20 @@ private fun SettingsDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                FilterChip(
+                    selected = webViewUa,
+                    onClick = {
+                        webViewUa = !webViewUa
+                        Settings.useWebViewUa = webViewUa
+                    },
+                    label = { Text("解析时沿用浏览器身份") }
+                )
+                Text(
+                    "默认关闭。yt-dlp 自带的身份是经过测试的，强行换成手机浏览器的" +
+                        "反而容易被判成机器人。只有某站的 Cookie 认浏览器时才需要打开。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
                 HorizontalDivider(Modifier.padding(vertical = 12.dp))
 
@@ -660,10 +694,18 @@ private fun SettingsDialog(vm: MainViewModel, onDismiss: () -> Unit) {
 
                 Text("解析引擎", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "内核是 yt-dlp，支持上千个站点。站点改版后更新一下通常就能恢复。" +
-                        (vm.engineVersion?.let { "\n当前版本：$it" } ?: ""),
+                    "内核是 yt-dlp。它比 App 本身重要得多：站点改版后，" +
+                        "旧引擎会直接被拒 (403)，更新一下基本就好了。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "当前版本：" + (engineVersion ?: "读取中…") +
+                        if (engineVersion != null && vm.engineIsStale()) "   已过期" else "",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (engineVersion != null && vm.engineIsStale())
+                        MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -674,15 +716,113 @@ private fun SettingsDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                             autoUpdate = !autoUpdate
                             Settings.autoUpdate = autoUpdate
                         },
-                        label = { Text("每天自动检查") }
+                        label = { Text("自动更新") }
+                    )
+                    FilterChip(
+                        selected = nightly,
+                        onClick = {
+                            nightly = !nightly
+                            Settings.nightlyEngine = nightly
+                        },
+                        label = { Text("每日构建") }
                     )
                 }
+                OutlinedTextField(
+                    value = engineUrl,
+                    onValueChange = { engineUrl = it; Settings.customEngineUrlValue = it },
+                    label = { Text("自定义更新地址（可留空）") },
+                    placeholder = { Text("https://…/yt-dlp") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
 
                 HorizontalDivider(Modifier.padding(vertical = 12.dp))
-                TextButton(onClick = { vm.clearAll() }) { Text("清空播放列表") }
+
+                Text("代理", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "如果你的梯子是「按应用分流」而没放行本 App，或者用的是本地端口代理，" +
+                        "这里填上；解析和播放都会走它。留空表示不走代理。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = proxy,
+                    onValueChange = { proxy = it },
+                    label = { Text("代理地址") },
+                    placeholder = { Text("http://127.0.0.1:7890") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedButton(onClick = { vm.setProxy(proxy) }) { Text("保存代理设置") }
+
+                HorizontalDivider(Modifier.padding(vertical = 12.dp))
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { showLog = true }) { Text("查看日志") }
+                    TextButton(onClick = { vm.clearAll() }) { Text("清空播放列表") }
+                }
             }
         }
     )
+}
+
+@Composable
+private fun LogDialog(text: String, onDismiss: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("诊断日志") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(text, style = MaterialTheme.typography.labelSmall, fontSize = 11.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                clipboard.setText(androidx.compose.ui.text.AnnotatedString(text))
+            }) { Text("复制") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+@Composable
+private fun UpdateReportDialog(text: String, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("更新解析引擎") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(text, style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("知道了") } }
+    )
+}
+
+/** Nudges the user toward the one fix that resolves most extraction failures. */
+@Composable
+private fun StaleEngineBanner(onUpdate: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "解析引擎已过期，很多网站会直接返回 403",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onUpdate) { Text("更新") }
+        }
+    }
 }
 
 // ------------------------------------------------------------------ helpers

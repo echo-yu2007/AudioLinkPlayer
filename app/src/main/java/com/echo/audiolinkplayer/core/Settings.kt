@@ -56,12 +56,42 @@ object Settings {
         set(v) { prefs.edit().putLong("lastUpdateCheck", v).apply() }
 
     /**
-     * The UA the in-app browser used when the cookies were captured. Passing the
-     * same UA to yt-dlp is what makes those cookies actually work.
+     * The UA the in-app browser used when the cookies were captured.
+     *
+     * Off by default: yt-dlp ships a UA that its extractors are actually tested
+     * against, and forcing a mobile WebView UA onto them is a good way to earn a
+     * 403 from a site's bot filter. Only worth turning on when a site's cookies
+     * are bound to the exact browser that created them.
      */
-    fun userAgent(context: Context): String? = p(context).getString("userAgent", null)
+    fun userAgent(context: Context): String? =
+        if (p(context).getBoolean("useWebViewUa", false))
+            p(context).getString("userAgent", null) else null
 
     fun setUserAgent(context: Context, ua: String?) {
         p(context).edit().putString("userAgent", ua).apply()
     }
+
+    var useWebViewUa: Boolean
+        get() = prefs.getBoolean("useWebViewUa", false)
+        set(v) { prefs.edit().putBoolean("useWebViewUa", v).apply() }
+
+    /** Proxy for both yt-dlp and the media stream, e.g. http://127.0.0.1:7890. */
+    fun proxy(context: Context): String? =
+        p(context).getString("proxy", null)?.takeIf { it.isNotBlank() }
+
+    var proxySpec: String
+        get() = prefs.getString("proxy", "") ?: ""
+        set(v) { prefs.edit().putString("proxy", v.trim()).apply() }
+
+    /** Optional direct URL to a yt-dlp build, tried before the built-in mirrors. */
+    fun customEngineUrl(context: Context): String? =
+        p(context).getString("engineUrl", null)?.takeIf { it.isNotBlank() }
+
+    var customEngineUrlValue: String
+        get() = prefs.getString("engineUrl", "") ?: ""
+        set(v) { prefs.edit().putString("engineUrl", v.trim()).apply() }
+
+    var nightlyEngine: Boolean
+        get() = prefs.getBoolean("nightlyEngine", false)
+        set(v) { prefs.edit().putBoolean("nightlyEngine", v).apply() }
 }

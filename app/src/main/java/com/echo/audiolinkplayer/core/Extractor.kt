@@ -3,6 +3,7 @@ package com.echo.audiolinkplayer.core
 import android.content.Context
 import android.util.Log
 import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLException
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -45,18 +46,24 @@ object Extractor {
         }
     }
 
-    /** Pulls the newest yt-dlp from GitHub. This is what keeps site support alive. */
-    suspend fun updateEngine(context: Context): String = withContext(Dispatchers.IO) {
+    /** Pulls the newest yt-dlp. This is what keeps site support alive. */
+    suspend fun updateEngine(
+        context: Context,
+        onProgress: (String) -> Unit = {}
+    ): EngineUpdater.Result = withContext(Dispatchers.IO) {
         ensureInit(context)
         runMutex.withLock {
-            val status = YoutubeDL.updateYoutubeDL(context, YoutubeDL.UpdateChannel.NIGHTLY)
-            engineVersion = runCatching { YoutubeDL.version(context) }.getOrNull()
-            when (status) {
-                YoutubeDL.UpdateStatus.DONE -> "已更新到 ${engineVersion ?: "最新版"}"
-                YoutubeDL.UpdateStatus.ALREADY_UP_TO_DATE -> "已是最新 (${engineVersion ?: "?"})"
-                else -> "更新结果未知"
-            }
+            val result = EngineUpdater.update(context, Settings.nightlyEngine, onProgress)
+            engineVersion = result.version ?: engineVersion
+            Diagnostics.add("更新引擎", result.detail)
+            result
         }
+    }
+
+    /** Ask the engine what it really is, rather than trusting a stored string. */
+    suspend fun refreshVersion(context: Context): String? {
+        engineVersion = EngineUpdater.currentVersion(context)
+        return engineVersion
     }
 
     private fun baseRequest(context: Context, url: String): YoutubeDLRequest =
@@ -67,6 +74,7 @@ object Extractor {
             addOption("--retries", "3")
             addOption("--geo-bypass")
             addOption("--no-check-certificates")
+            Settings.proxy(context)?.let { addOption("--proxy", it) }
             Settings.userAgent(context)?.let { addOption("--user-agent", it) }
             val cookies = CookieStore.cookieFile(context)
             if (cookies.exists() && cookies.length() > 0) {
@@ -85,8 +93,7 @@ object Extractor {
             val req = baseRequest(context, url)
                 .addOption("-J")
                 .addOption("--flat-playlist")
-            val out = YoutubeDL.execute(req, null, false, null).out
-            JSONObject(out.substring(out.indexOf('{')))
+            run(req, "解析链接 $url")
         }
 
         if (json.optString("_type") == "playlist") {
@@ -134,13 +141,31 @@ object Extractor {
                 val req = baseRequest(context, sourceUrl)
                     .addOption("-J")
                     .addOption("--no-playlist")
-                val out = YoutubeDL.execute(req, null, false, null).out
-                JSONObject(out.substring(out.indexOf('{')))
+                run(req, "提取流地址 $sourceUrl")
             }
             val info = parseInfo(sourceUrl, json)
             infoCache[sourceUrl] = info
             info
         }
+
+    /** Runs a request, logging the full command and any stderr for diagnostics. */
+    private fun run(req: YoutubeDLRequest, what: String): JSONObject {
+        Diagnostics.add(what, "yt-dlp " + req.buildCommand().joinToString(" "))
+        try {
+            val response = YoutubeDL.execute(req, null, false, null)
+            if (response.err.isNotBlank()) Diagnostics.add("$what · stderr", response.err)
+            val out = response.out
+            val brace = out.indexOf('{')
+            if (brace < 0) {
+                Diagnostics.add("$what · 无输出", out.take(2000))
+                throw YoutubeDLException(response.err.ifBlank { "yt-dlp 没有返回任何数据" })
+            }
+            return JSONObject(out.substring(brace))
+        } catch (e: Throwable) {
+            Diagnostics.add("$what · 失败", e.message ?: e.toString())
+            throw e
+        }
+    }
 
     fun invalidate(sourceUrl: String) {
         infoCache.remove(sourceUrl)
