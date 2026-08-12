@@ -89,11 +89,18 @@ object Extractor {
      */
     suspend fun resolveLinks(context: Context, url: String): List<Track> = withContext(Dispatchers.IO) {
         ensureInit(context)
-        val json = runMutex.withLock {
-            val req = baseRequest(context, url)
-                .addOption("-J")
-                .addOption("--flat-playlist")
-            run(req, "解析链接 $url")
+        val json = try {
+            runMutex.withLock {
+                val req = baseRequest(context, url)
+                    .addOption("-J")
+                    .addOption("--flat-playlist")
+                run(req, "解析链接 $url")
+            }
+        } catch (e: Throwable) {
+            // Sites that fingerprint the TLS handshake reject yt-dlp outright.
+            // The system WebView is a real browser, so let it try.
+            val web = webFallback(context, url) ?: throw e
+            return@withContext listOf(trackOf(web))
         }
 
         if (json.optString("_type") == "playlist") {
@@ -137,11 +144,15 @@ object Extractor {
         withContext(Dispatchers.IO) {
             if (!force) infoCache[sourceUrl]?.takeIf { it.isFresh }?.let { return@withContext it }
             ensureInit(context)
-            val json = runMutex.withLock {
-                val req = baseRequest(context, sourceUrl)
-                    .addOption("-J")
-                    .addOption("--no-playlist")
-                run(req, "提取流地址 $sourceUrl")
+            val json = try {
+                runMutex.withLock {
+                    val req = baseRequest(context, sourceUrl)
+                        .addOption("-J")
+                        .addOption("--no-playlist")
+                    run(req, "提取流地址 $sourceUrl")
+                }
+            } catch (e: Throwable) {
+                return@withContext webFallback(context, sourceUrl) ?: throw e
             }
             val info = parseInfo(sourceUrl, json)
             infoCache[sourceUrl] = info
@@ -166,6 +177,23 @@ object Extractor {
             throw e
         }
     }
+
+    private suspend fun webFallback(context: Context, url: String): MediaInfo? {
+        if (!Settings.webFallback(context)) return null
+        val info = WebExtractor.extract(context, url) ?: return null
+        infoCache[url] = info
+        return info
+    }
+
+    private fun trackOf(info: MediaInfo) = Track(
+        id = newId(),
+        sourceUrl = info.sourceUrl,
+        title = info.title,
+        uploader = info.uploader,
+        thumbnail = info.thumbnail,
+        durationMs = info.durationMs,
+        isLive = info.isLive
+    )
 
     fun invalidate(sourceUrl: String) {
         infoCache.remove(sourceUrl)

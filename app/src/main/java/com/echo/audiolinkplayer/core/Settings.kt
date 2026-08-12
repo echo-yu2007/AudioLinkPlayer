@@ -91,6 +91,17 @@ object Settings {
         get() = prefs.getString("engineUrl", "") ?: ""
         set(v) { prefs.edit().putString("engineUrl", v.trim()).apply() }
 
+    /**
+     * Retry a failed extraction inside the system WebView. Needed for sites that
+     * fingerprint the TLS handshake and reject yt-dlp no matter what headers it sends.
+     */
+    fun webFallback(context: Context): Boolean =
+        p(context).getBoolean("webFallback", true)
+
+    var webFallbackEnabled: Boolean
+        get() = prefs.getBoolean("webFallback", true)
+        set(v) { prefs.edit().putBoolean("webFallback", v).apply() }
+
     var nightlyEngine: Boolean
         get() = prefs.getBoolean("nightlyEngine", false)
         set(v) { prefs.edit().putBoolean("nightlyEngine", v).apply() }

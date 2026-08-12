@@ -622,6 +622,7 @@ private fun SettingsDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     var proxy by remember { mutableStateOf(Settings.proxySpec) }
     var engineUrl by remember { mutableStateOf(Settings.customEngineUrlValue) }
     var showLog by remember { mutableStateOf(false) }
+    var webFallback by remember { mutableStateOf(Settings.webFallbackEnabled) }
     var webViewUa by remember { mutableStateOf(Settings.useWebViewUa) }
     val engineVersion by vm.engineVersion.collectAsState()
     val domains = remember { vm.cookieDomains() }
@@ -689,6 +690,25 @@ private fun SettingsDialog(vm: MainViewModel, onDismiss: () -> Unit) {
                     steps = 15
                 )
                 OutlinedButton(onClick = { vm.clearCache() }) { Text("清空缓存") }
+
+                HorizontalDivider(Modifier.padding(vertical = 12.dp))
+
+                Text("浏览器解析（备用）", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "有些网站（PornHub 是典型）会识别 TLS 指纹，专挑 yt-dlp 拦，" +
+                        "返回 403。打开这个后，yt-dlp 失败时会改用系统 WebView 加载页面，" +
+                        "从真实浏览器请求里嗅探播放地址。慢一些（十几秒），但能过。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                FilterChip(
+                    selected = webFallback,
+                    onClick = {
+                        webFallback = !webFallback
+                        Settings.webFallbackEnabled = webFallback
+                    },
+                    label = { Text(if (webFallback) "已开启" else "已关闭") }
+                )
 
                 HorizontalDivider(Modifier.padding(vertical = 12.dp))
 
